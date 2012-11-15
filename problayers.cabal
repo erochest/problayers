@@ -29,3 +29,5 @@ executable problayers
                      , http-types >=0.7
                      , bytestring >=0.9
                      , system-filepath >=0.4
+                     , mtl >=2.1
+                     , lifted-base >=0.2

@@ -1,12 +1,16 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE FlexibleContexts   #-}
+{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module Main where
 
 
 import           Control.Applicative
+import qualified Control.Exception as E
+import qualified Control.Exception.Lifted as EL
 import qualified Control.Monad as M
+import           Control.Monad.Error
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Types as AT
 import qualified Data.ByteString.Lazy as BSL
@@ -14,8 +18,10 @@ import qualified Data.Conduit as C
 import qualified Data.Conduit.List as CL
 import           Data.Int (Int64)
 import           Data.Monoid
+import           Data.String (IsString(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import           Data.Typeable
 import           Database.Persist.GenericSql
 import           Database.Persist.GenericSql.Raw
 import           Database.Persist.Postgresql
@@ -23,8 +29,9 @@ import           Database.Persist.Store (PersistValue(..))
 import qualified Filesystem.Path.CurrentOS as FS
 import           Network.HTTP.Conduit
 import           Network.HTTP.Conduit.Browser
-import           Network.HTTP.Types (Method(..))
-import           System.IO (writeFile)
+import           Network.HTTP.Types (Method)
+
+import Debug.Trace
 
 
 -- | This represents a problem layer. It contains the database name and table
@@ -44,6 +51,7 @@ type AuthFn = Request (C.ResourceT IO) -> Request (C.ResourceT IO)
 -- | This is the base URL for the GeoServer instance.
 geoServerBaseUrl :: String
 geoServerBaseUrl = "http://libsvr35.lib.virginia.edu:8080/geoserver/rest"
+-- geoServerBaseUrl = "http://geoserver.dev:8080/geoserver/rest"
 
 -- | This is the GeoServer authentication information.
 geoServerAuth :: AuthFn
@@ -53,20 +61,49 @@ geoServerAuth = applyBasicAuth "slabadmin" "GIS4slab!"
 cxnString :: ConnectionString
 cxnString = "host=lon.lib.virginia.edu user=err8n"
 
+-- | Handle HttpException with ErrorT
+data HttpError = HttpError
+               | HttpMsgError String
+               | HttpExc HttpException
+               deriving (Show, Typeable)
+instance E.Exception HttpError
+
+instance IsString HttpError where 
+    fromString = HttpMsgError
+
+instance Error HttpError where
+    noMsg  = HttpError
+    strMsg = HttpMsgError
+
+type HttpMonad = ErrorT HttpError IO
+
+maybeErr :: (Monad m, Error b) => b -> Maybe a -> ErrorT b m a
+maybeErr _ (Just a) = return a
+maybeErr b Nothing  = throwError b
+
 -- | This performs a REST request and returns the raw ByteString.
-restBS :: String -> Method -> AuthFn -> IO BSL.ByteString
+restBS :: String -> Method -> AuthFn -> HttpMonad BSL.ByteString
 restBS url method authFn = do
-    man  <- newManager def
-    req  <- authFn <$> parseUrl url
-    resp <- C.runResourceT
-          . browse man
-          . makeRequestLbs
-          $ req { method = method }
-    return $ responseBody resp
+    man  <- liftIO $ newManager def
+    req  <- liftIO (authFn <$> parseUrl url)
+    resp <- liftIO . getResource man $ req {method=method}
+    case resp of
+        Right resp' -> return resp'
+        Left err    -> throwError $ HttpExc err
+
+-- | This gets a resource, trapping the error, and returning either the result
+-- or the error string.
+getResource :: Manager -> Request (C.ResourceT IO)
+            -> IO (Either HttpException BSL.ByteString)
+getResource manager req = C.runResourceT $
+    EL.catch ((Right . responseBody) <$> browse manager (makeRequestLbs req))
+             (return . Left)
 
 -- | This performs a REST request and parses the resulting JSON.
-restJson :: AT.FromJSON a => String -> Method -> AuthFn -> IO (Maybe a)
-restJson url method authFn = A.decode <$> restBS url method authFn
+restJson :: AT.FromJSON a => String -> Method -> AuthFn -> HttpMonad a
+restJson url method authFn =
+    restBS url method authFn >>=
+    maybeErr "Invalid JSON object." . A.decode
 
 -- | This takes a directory name, a problem layer, and a GeoServer URL, and it
 -- attempts to download the layer's data as XML from the source. Whatever it
@@ -75,10 +112,10 @@ getProblemData :: String
                -> AuthFn
                -> FS.FilePath
                -> ProblemLayer
-               -> IO FS.FilePath
+               -> HttpMonad FS.FilePath
 getProblemData gsUrl authFn dirName (ProblemLayer {..}) =
-    restBS url "GET" authFn >>=
-    BSL.writeFile (FS.encodeString xml) >>
+    restBS url "GET" authFn                      >>=
+    liftIO . BSL.writeFile (FS.encodeString xml) >>
     return xml
     where url =  gsUrl ++ "/workspaces/" ++ T.unpack problemDbName
               ++ "/datastores/" ++ T.unpack problemDbName ++ ".json"
@@ -125,7 +162,9 @@ getProblemLayers dbName = withPostgresqlPool cxnString' 3 $ runSqlPool $ do
 
 main :: IO ()
 main =
-    getDbs cxnString                                                >>=
-    M.liftM concat . M.mapM getProblemLayers                        >>=
-    M.mapM (getProblemData geoServerBaseUrl geoServerAuth "layers") >>=
-    M.mapM_ print
+    getDbs cxnString                                                 >>=
+    M.liftM concat . M.mapM getProblemLayers                         >>=
+    M.mapM ( runErrorT
+           . getProblemData geoServerBaseUrl geoServerAuth "layers") >>=
+    M.mapM_ (either (putStrLn . mappend "ERROR : " . show)
+                    (putStrLn . ("OK    : " ++) . FS.encodeString))
