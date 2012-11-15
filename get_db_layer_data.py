@@ -11,11 +11,17 @@ GEOSERVER = 'http://libsvr35.lib.virginia.edu:8080/geoserver/rest'
 GEOSERVER_AUTH = ('slabadmin', 'GIS4slab!')
 
 
+def debug(msg):
+    sys.stderr.write(msg + '\n')
+    sys.stderr.flush()
+
+
 def rest_req(uri, method='get', headers=None, data=None):
     method_fn = getattr(requests, method)
     headers = headers or {}
     data = data or {}
 
+    debug('FETCHING "{0}"'.format(uri))
     r = method_fn(uri, auth=GEOSERVER_AUTH, headers=headers, data=data)
     r.raise_for_status()
     return r
@@ -53,10 +59,20 @@ class DataStore(object):
 
     def _load_feature_types(self):
         ft_url = self.data_store['featureTypes']
-        return dict(
-                (ft['name'], ft['href'])
-                for ft in rest_json(ft_url)['featureTypes']['featureType']
-                )
+        json = rest_json(ft_url)
+        if not json['featureTypes']:
+            return {}
+        else:
+            try:
+                return dict(
+                        (ft['name'], ft['href'])
+                        for ft in json['featureTypes']['featureType']
+                        )
+            except:
+                import pprint
+                debug('ERROR ON')
+                pprint.pprint(json)
+                raise
 
     @property
     def feature_types(self):
@@ -71,9 +87,12 @@ def get_dstore(workspace_name, cache):
     dstore = cache.get(workspace_name)
     if dstore is None:
         ds_url = '/workspaces/{0}/datastores/{0}.json'.format(workspace_name)
-        cache[workspace_name] = dstore = DataStore(
-                workspace_name, geoserver(ds_url)['dataStore']
-                )
+        try:
+            cache[workspace_name] = dstore = DataStore(
+                    workspace_name, geoserver(ds_url)['dataStore']
+                    )
+        except:
+            dstore = None
     return dstore
 
 
@@ -81,8 +100,16 @@ def main():
     dstores = {}
 
     for line in fileinput.input():
+        debug('INPUT: "{0}"'.format(line.strip()))
         (workspace_name, layer_name) = line.strip().split('.')
         dstore = get_dstore(workspace_name, dstores)
+
+        if dstore is None:
+            debug('Cannot load datastore {0}. skipping.'.format(
+                workspace_name,
+                ))
+            continue
+
         cxn_params = to_dict(dstore['connectionParameters'])
 
         if (cxn_params['dbtype'] == 'postgis' and
