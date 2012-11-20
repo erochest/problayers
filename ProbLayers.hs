@@ -31,7 +31,7 @@ import           Network.HTTP.Conduit
 import           Network.HTTP.Conduit.Browser
 import           Network.HTTP.Types (Method)
 
-import Debug.Trace
+-- import Debug.Trace
 
 
 -- | This represents a problem layer. It contains the database name and table
@@ -64,7 +64,7 @@ cxnString = "host=lon.lib.virginia.edu user=err8n"
 -- | Handle HttpException with ErrorT
 data HttpError = HttpError
                | HttpMsgError String
-               | HttpExc HttpException
+               | HttpExc String HttpException
                deriving (Show, Typeable)
 instance E.Exception HttpError
 
@@ -89,7 +89,7 @@ restBS url method authFn = do
     resp <- liftIO . getResource man $ req {method=method}
     case resp of
         Right resp' -> return resp'
-        Left err    -> throwError $ HttpExc err
+        Left err    -> throwError $ HttpExc url err
 
 -- | This gets a resource, trapping the error, and returning either the result
 -- or the error string.
