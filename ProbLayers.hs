@@ -3,6 +3,22 @@
 {-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 
+-- | This takes care of querying, identifing, and deleting the problem layers.
+-- Right now, *problem layers* is defined as being those that are missing
+-- Postgres tables, even though PostGIS believes the should exist and GeoServer
+-- does as well.
+--
+-- Currently, this:
+--
+-- 1. Queries Postgres to identify the problem layers;
+--
+-- 2. Gets the data available from GeoServer for those layers and saves it to
+-- a file;
+--
+-- 3. /TODO/: deletes the layer from GeoServer; and
+--
+-- 4. /TODO/: deletes the PostGIS row for that resource from geometry_columns.
+
 module Main where
 
 
@@ -117,9 +133,13 @@ getProblemData gsUrl authFn dirName (ProblemLayer {..}) =
     restBS url "GET" authFn                      >>=
     liftIO . BSL.writeFile (FS.encodeString xml) >>
     return xml
-    where url =  gsUrl ++ "/workspaces/" ++ T.unpack problemDbName
-              ++ "/datastores/" ++ T.unpack problemDbName ++ ".json"
-          xml = dirName FS.</> FS.fromText problemDbName FS.<.> "xml"
+    where url  =  gsUrl ++ "/workspaces/" ++ T.unpack problemDbName
+               ++ "/datastores/" ++ T.unpack problemDbName ++ ".json"
+          base = T.concat [ problemDbName
+                          , "-"
+                          , problemTableName
+                          ]
+          xml  = dirName FS.</> FS.fromText base FS.<.> "xml"
 
 -- | This takes a single-item tuple containing text and returns the text.
 getTextValue :: [PersistValue] -> Maybe T.Text
